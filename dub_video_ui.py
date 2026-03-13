@@ -83,7 +83,10 @@ class LogCapture:
 
 def dub_single_video(video_path, engine, voice, ref_wav_path, model_size,
                      device, natural_pace, max_speedup, keep_original,
-                     original_volume, gen_subtitles, output_dir=None):
+                     original_volume, gen_subtitles, output_dir=None,
+                     watermark_path=None, watermark_opacity=0.3,
+                     watermark_x="W-w-10", watermark_y="H-h-10",
+                     intro_path=None, outro_path=None):
     """Core dubbing logic for a single video. Returns (output_video, output_srt, log_text, segments_text, error)."""
     log = LogCapture()
     log.start()
@@ -148,7 +151,13 @@ def dub_single_video(video_path, engine, voice, ref_wav_path, model_size,
                 original_volume=original_volume,
                 natural_pace=natural_pace,
             )
-            merge_video_audio(video_path, final_audio, output_video)
+            merge_video_audio(video_path, final_audio, output_video,
+                              watermark_path=watermark_path,
+                              watermark_opacity=watermark_opacity,
+                              watermark_x=watermark_x,
+                              watermark_y=watermark_y,
+                              intro_path=intro_path,
+                              outro_path=outro_path)
             print(f"Video saved: {output_video}")
 
             # Subtitles
@@ -183,7 +192,10 @@ def dub_single_video(video_path, engine, voice, ref_wav_path, model_size,
 
 def run_single(video_file, tts_engine, voice_name, speaker_wav, model_size,
                device, natural_pace, max_speedup, keep_original,
-               original_volume, gen_subtitles, progress=gr.Progress(track_tqdm=False)):
+               original_volume, gen_subtitles,
+               watermark_file, watermark_opacity, watermark_x, watermark_y,
+               intro_file, outro_file,
+               progress=gr.Progress(track_tqdm=False)):
 
     if video_file is None:
         raise gr.Error("Please upload a video file.")
@@ -200,6 +212,12 @@ def run_single(video_file, tts_engine, voice_name, speaker_wav, model_size,
         video_file, engine, voice, ref_wav_path, model_size,
         device, natural_pace, max_speedup, keep_original,
         original_volume, gen_subtitles,
+        watermark_path=watermark_file,
+        watermark_opacity=watermark_opacity,
+        watermark_x=watermark_x,
+        watermark_y=watermark_y,
+        intro_path=intro_file,
+        outro_path=outro_file,
     )
 
     if error:
@@ -220,7 +238,10 @@ def run_single(video_file, tts_engine, voice_name, speaker_wav, model_size,
 
 def run_batch(input_folder, output_folder, tts_engine, voice_name, speaker_wav,
               model_size, device, natural_pace, max_speedup, keep_original,
-              original_volume, gen_subtitles, progress=gr.Progress(track_tqdm=False)):
+              original_volume, gen_subtitles,
+              watermark_file, watermark_opacity, watermark_x, watermark_y,
+              intro_file, outro_file,
+              progress=gr.Progress(track_tqdm=False)):
 
     if not input_folder or not input_folder.strip():
         raise gr.Error("Please enter an input folder path.")
@@ -273,6 +294,12 @@ def run_batch(input_folder, output_folder, tts_engine, voice_name, speaker_wav,
             vpath, engine, voice, ref_wav_path, model_size,
             device, natural_pace, max_speedup, keep_original,
             original_volume, gen_subtitles, output_dir=out_dir,
+            watermark_path=watermark_file,
+            watermark_opacity=watermark_opacity,
+            watermark_x=watermark_x,
+            watermark_y=watermark_y,
+            intro_path=intro_file,
+            outro_path=outro_file,
         )
 
         all_logs.append(log_text)
@@ -372,6 +399,35 @@ with gr.Blocks(title="Video Dubbing: EN -> ES", theme=gr.themes.Soft()) as app:
                 label="Generate Spanish subtitles (.srt)",
             )
 
+            with gr.Accordion("Watermark", open=False):
+                watermark_input = gr.Image(
+                    label="Watermark image (PNG with transparency recommended)",
+                    type="filepath",
+                )
+                watermark_opacity_slider = gr.Slider(
+                    minimum=0.0, maximum=1.0, step=0.05, value=0.3,
+                    label="Watermark opacity (0 = invisible, 1 = fully opaque)",
+                )
+                with gr.Row():
+                    watermark_x_input = gr.Textbox(
+                        value="W-w-10", label="X position",
+                        info="FFmpeg expression. W-w-10 = right, 10 = left, (W-w)/2 = center",
+                    )
+                    watermark_y_input = gr.Textbox(
+                        value="H-h-10", label="Y position",
+                        info="FFmpeg expression. H-h-10 = bottom, 10 = top, (H-h)/2 = center",
+                    )
+
+            with gr.Accordion("Intro / Outro videos", open=False):
+                intro_input = gr.Video(
+                    label="Intro video (prepended before the dubbed video)",
+                    sources=["upload"],
+                )
+                outro_input = gr.Video(
+                    label="Outro video (appended after the dubbed video)",
+                    sources=["upload"],
+                )
+
         # ── Right column: tabs for single / batch ──
         with gr.Column(scale=1):
             with gr.Tabs():
@@ -431,6 +487,9 @@ with gr.Blocks(title="Video Dubbing: EN -> ES", theme=gr.themes.Soft()) as app:
             video_input, tts_engine_radio, voice_dropdown, speaker_wav_input,
             model_dropdown, device_radio, natural_pace_check, max_speedup_slider,
             keep_original_check, original_vol_slider, gen_subs_check,
+            watermark_input, watermark_opacity_slider,
+            watermark_x_input, watermark_y_input,
+            intro_input, outro_input,
         ],
         outputs=[video_output, single_files, log_output, segments_table],
     )
@@ -442,6 +501,9 @@ with gr.Blocks(title="Video Dubbing: EN -> ES", theme=gr.themes.Soft()) as app:
             speaker_wav_input, model_dropdown, device_radio, natural_pace_check,
             max_speedup_slider, keep_original_check, original_vol_slider,
             gen_subs_check,
+            watermark_input, watermark_opacity_slider,
+            watermark_x_input, watermark_y_input,
+            intro_input, outro_input,
         ],
         outputs=[batch_files, log_output, batch_summary],
     )
