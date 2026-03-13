@@ -86,7 +86,9 @@ def dub_single_video(video_path, engine, voice, ref_wav_path, model_size,
                      original_volume, gen_subtitles, output_dir=None,
                      watermark_path=None, watermark_opacity=0.3,
                      watermark_x="W-w-10", watermark_y="H-h-10",
-                     intro_path=None, outro_path=None):
+                     intro_path=None, outro_path=None,
+                     intro_fade_in=0.0, intro_fade_out=0.0,
+                     outro_fade_in=0.0, outro_fade_out=0.0):
     """Core dubbing logic for a single video. Returns (output_video, output_srt, log_text, segments_text, error)."""
     log = LogCapture()
     log.start()
@@ -157,7 +159,11 @@ def dub_single_video(video_path, engine, voice, ref_wav_path, model_size,
                               watermark_x=watermark_x,
                               watermark_y=watermark_y,
                               intro_path=intro_path,
-                              outro_path=outro_path)
+                              outro_path=outro_path,
+                              intro_fade_in=intro_fade_in,
+                              intro_fade_out=intro_fade_out,
+                              outro_fade_in=outro_fade_in,
+                              outro_fade_out=outro_fade_out)
             print(f"Video saved: {output_video}")
 
             # Subtitles
@@ -194,7 +200,8 @@ def run_single(video_file, tts_engine, voice_name, speaker_wav, model_size,
                device, natural_pace, max_speedup, keep_original,
                original_volume, gen_subtitles,
                watermark_file, watermark_opacity, watermark_x, watermark_y,
-               intro_file, outro_file,
+               intro_file, intro_fade_in, intro_fade_out,
+               outro_file, outro_fade_in, outro_fade_out,
                progress=gr.Progress(track_tqdm=False)):
 
     if video_file is None:
@@ -218,6 +225,10 @@ def run_single(video_file, tts_engine, voice_name, speaker_wav, model_size,
         watermark_y=watermark_y,
         intro_path=intro_file,
         outro_path=outro_file,
+        intro_fade_in=intro_fade_in,
+        intro_fade_out=intro_fade_out,
+        outro_fade_in=outro_fade_in,
+        outro_fade_out=outro_fade_out,
     )
 
     if error:
@@ -240,7 +251,8 @@ def run_batch(input_folder, output_folder, tts_engine, voice_name, speaker_wav,
               model_size, device, natural_pace, max_speedup, keep_original,
               original_volume, gen_subtitles,
               watermark_file, watermark_opacity, watermark_x, watermark_y,
-              intro_file, outro_file,
+              intro_file, intro_fade_in, intro_fade_out,
+              outro_file, outro_fade_in, outro_fade_out,
               progress=gr.Progress(track_tqdm=False)):
 
     if not input_folder or not input_folder.strip():
@@ -300,6 +312,10 @@ def run_batch(input_folder, output_folder, tts_engine, voice_name, speaker_wav,
             watermark_y=watermark_y,
             intro_path=intro_file,
             outro_path=outro_file,
+            intro_fade_in=intro_fade_in,
+            intro_fade_out=intro_fade_out,
+            outro_fade_in=outro_fade_in,
+            outro_fade_out=outro_fade_out,
         )
 
         all_logs.append(log_text)
@@ -423,10 +439,28 @@ with gr.Blocks(title="Video Dubbing: EN -> ES", theme=gr.themes.Soft()) as app:
                     label="Intro video (prepended before the dubbed video)",
                     sources=["upload"],
                 )
+                with gr.Row():
+                    intro_fade_in_slider = gr.Slider(
+                        minimum=0.0, maximum=3.0, step=0.25, value=0.0,
+                        label="Intro fade in (s)",
+                    )
+                    intro_fade_out_slider = gr.Slider(
+                        minimum=0.0, maximum=3.0, step=0.25, value=0.0,
+                        label="Intro fade out (s)",
+                    )
                 outro_input = gr.Video(
                     label="Outro video (appended after the dubbed video)",
                     sources=["upload"],
                 )
+                with gr.Row():
+                    outro_fade_in_slider = gr.Slider(
+                        minimum=0.0, maximum=3.0, step=0.25, value=0.0,
+                        label="Outro fade in (s)",
+                    )
+                    outro_fade_out_slider = gr.Slider(
+                        minimum=0.0, maximum=3.0, step=0.25, value=0.0,
+                        label="Outro fade out (s)",
+                    )
 
         # ── Right column: tabs for single / batch ──
         with gr.Column(scale=1):
@@ -489,7 +523,8 @@ with gr.Blocks(title="Video Dubbing: EN -> ES", theme=gr.themes.Soft()) as app:
             keep_original_check, original_vol_slider, gen_subs_check,
             watermark_input, watermark_opacity_slider,
             watermark_x_input, watermark_y_input,
-            intro_input, outro_input,
+            intro_input, intro_fade_in_slider, intro_fade_out_slider,
+            outro_input, outro_fade_in_slider, outro_fade_out_slider,
         ],
         outputs=[video_output, single_files, log_output, segments_table],
     )
@@ -503,7 +538,8 @@ with gr.Blocks(title="Video Dubbing: EN -> ES", theme=gr.themes.Soft()) as app:
             gen_subs_check,
             watermark_input, watermark_opacity_slider,
             watermark_x_input, watermark_y_input,
-            intro_input, outro_input,
+            intro_input, intro_fade_in_slider, intro_fade_out_slider,
+            outro_input, outro_fade_in_slider, outro_fade_out_slider,
         ],
         outputs=[batch_files, log_output, batch_summary],
     )

@@ -270,38 +270,79 @@ def mix_audio(segments: list, total_duration: float, original_audio_path: str,
     return base
 
 
+def _get_video_duration(path: str) -> float:
+    """Get video duration in seconds."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True
+    )
+    return float(result.stdout.strip())
+
+
+def _get_video_resolution(path: str) -> tuple:
+    """Get video width, height."""
+    probe = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height",
+         "-of", "csv=p=0", path],
+        capture_output=True, text=True
+    )
+    w, h = probe.stdout.strip().split(",")
+    return w, h
+
+
+def _apply_fade(input_path: str, output_path: str, w: str, h: str,
+                fade_in: float = 0.0, fade_out: float = 0.0):
+    """Re-encode a video with optional fade in/out, scaled to w x h."""
+    duration = _get_video_duration(input_path)
+
+    vfilters = [
+        f"scale={w}:{h}:force_original_aspect_ratio=decrease",
+        f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
+    ]
+    afilters = []
+
+    if fade_in > 0:
+        vfilters.append(f"fade=t=in:st=0:d={fade_in}")
+        afilters.append(f"afade=t=in:st=0:d={fade_in}")
+    if fade_out > 0:
+        fade_start = max(0, duration - fade_out)
+        vfilters.append(f"fade=t=out:st={fade_start}:d={fade_out}")
+        afilters.append(f"afade=t=out:st={fade_start}:d={fade_out}")
+
+    vf = ",".join(vfilters)
+    cmd = ["ffmpeg", "-y", "-i", input_path, "-vf", vf]
+    if afilters:
+        cmd += ["-af", ",".join(afilters)]
+    cmd += ["-c:v", "libx264", "-preset", "fast", "-crf", "18",
+            "-c:a", "aac", "-ar", "44100", "-ac", "2",
+            "-f", "mpegts", output_path]
+    subprocess.run(cmd, capture_output=True, check=True)
+
+
 def merge_video_audio(video_path: str, audio_segment: AudioSegment, output_path: str,
                       watermark_path: str = None, watermark_opacity: float = 0.3,
                       watermark_x: str = "W-w-10", watermark_y: str = "H-h-10",
-                      intro_path: str = None, outro_path: str = None):
-    """Merge the dubbed audio back into the video, with optional watermark and intro/outro."""
+                      intro_path: str = None, outro_path: str = None,
+                      intro_fade_in: float = 0.0, intro_fade_out: float = 0.0,
+                      outro_fade_in: float = 0.0, outro_fade_out: float = 0.0):
+    """Merge dubbed audio into video. Watermark applies only to main video, not intro/outro."""
+    import shutil
+
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_audio:
         audio_segment.export(tmp_audio.name, format="wav")
         tmp_files = [tmp_audio.name]
 
         try:
+            # Step A: Build main video (audio replacement + optional watermark)
             if watermark_path and os.path.exists(watermark_path):
-                # Merge audio + apply watermark in one pass
                 print(f"  Applying watermark: {watermark_path} (opacity={watermark_opacity})")
-                tmp_wm = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-                tmp_files.append(tmp_wm.name)
-                tmp_wm.close()
+                tmp_main = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+                tmp_files.append(tmp_main.name)
+                tmp_main.close()
 
                 opacity = max(0.0, min(1.0, watermark_opacity))
-                overlay_filter = (
-                    f"[1:v]format=rgba,colorchannelmixer=aa={opacity}[wm];"
-                    f"[0:v][wm]overlay={watermark_x}:{watermark_y}"
-                )
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", video_path, "-i", watermark_path,
-                     "-i", tmp_audio.name,
-                     "-filter_complex", overlay_filter,
-                     "-map", "[v]" if False else "",  # placeholder
-                     "-map", "2:a:0",
-                     "-c:a", "aac", "-shortest", tmp_wm.name],
-                    capture_output=True, check=False
-                )
-                # Simpler approach: two inputs (video + watermark), overlay, then replace audio
                 subprocess.run(
                     ["ffmpeg", "-y",
                      "-i", video_path, "-i", watermark_path, "-i", tmp_audio.name,
@@ -310,82 +351,76 @@ def merge_video_audio(video_path: str, audio_segment: AudioSegment, output_path:
                      f"[0:v][wm]overlay={watermark_x}:{watermark_y}[outv]",
                      "-map", "[outv]", "-map", "2:a:0",
                      "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                     "-c:a", "aac", "-shortest", tmp_wm.name],
+                     "-c:a", "aac", "-shortest", tmp_main.name],
                     capture_output=True, check=True
                 )
-                main_video = tmp_wm.name
+                main_video = tmp_main.name
             else:
-                # No watermark — just merge audio
-                tmp_merged = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-                tmp_files.append(tmp_merged.name)
-                tmp_merged.close()
+                tmp_main = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+                tmp_files.append(tmp_main.name)
+                tmp_main.close()
                 subprocess.run(
                     ["ffmpeg", "-y", "-i", video_path, "-i", tmp_audio.name,
                      "-c:v", "copy", "-map", "0:v:0", "-map", "1:a:0",
-                     "-shortest", tmp_merged.name],
+                     "-shortest", tmp_main.name],
                     capture_output=True, check=True
                 )
-                main_video = tmp_merged.name
+                main_video = tmp_main.name
 
-            # Concatenate intro + main + outro if provided
-            parts_to_concat = []
-            if intro_path and os.path.exists(intro_path):
-                print(f"  Prepending intro: {intro_path}")
-                parts_to_concat.append(intro_path)
-            parts_to_concat.append(main_video)
-            if outro_path and os.path.exists(outro_path):
-                print(f"  Appending outro: {outro_path}")
-                parts_to_concat.append(outro_path)
+            # Check if we need intro/outro
+            has_intro = intro_path and os.path.exists(intro_path)
+            has_outro = outro_path and os.path.exists(outro_path)
 
-            if len(parts_to_concat) > 1:
-                # Need to re-encode all parts to same format for concat
-                normalized = []
-                for i, part in enumerate(parts_to_concat):
-                    norm_path = tempfile.NamedTemporaryFile(suffix=".ts", delete=False).name
-                    tmp_files.append(norm_path)
-                    # Get target resolution from main video
-                    if i == 0 and part != main_video:
-                        # First call: get main video resolution
-                        probe = subprocess.run(
-                            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
-                             "-show_entries", "stream=width,height",
-                             "-of", "csv=p=0", main_video],
-                            capture_output=True, text=True
-                        )
-                        w, h = probe.stdout.strip().split(",")
-                    elif not hasattr(merge_video_audio, '_res'):
-                        probe = subprocess.run(
-                            ["ffprobe", "-v", "quiet", "-select_streams", "v:0",
-                             "-show_entries", "stream=width,height",
-                             "-of", "csv=p=0", main_video],
-                            capture_output=True, text=True
-                        )
-                        w, h = probe.stdout.strip().split(",")
+            if not has_intro and not has_outro:
+                shutil.move(main_video, output_path)
+                tmp_files.remove(main_video)
+            else:
+                # Get main video resolution for scaling intro/outro
+                w, h = _get_video_resolution(main_video)
 
-                    subprocess.run(
-                        ["ffmpeg", "-y", "-i", part,
-                         "-vf", f"scale={w}:{h}:force_original_aspect_ratio=decrease,"
-                                f"pad={w}:{h}:(ow-iw)/2:(oh-ih)/2",
-                         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
-                         "-c:a", "aac", "-ar", "44100", "-ac", "2",
-                         "-f", "mpegts", norm_path],
-                        capture_output=True, check=True
-                    )
-                    normalized.append(norm_path)
+                # Step B: Normalize main video to .ts
+                main_ts = tempfile.NamedTemporaryFile(suffix=".ts", delete=False).name
+                tmp_files.append(main_ts)
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", main_video,
+                     "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+                     "-c:a", "aac", "-ar", "44100", "-ac", "2",
+                     "-f", "mpegts", main_ts],
+                    capture_output=True, check=True
+                )
 
-                concat_input = "concat:" + "|".join(normalized)
+                parts = []
+
+                # Step C: Intro with fade
+                if has_intro:
+                    print(f"  Prepending intro: {intro_path}"
+                          f" (fade_in={intro_fade_in}s, fade_out={intro_fade_out}s)")
+                    intro_ts = tempfile.NamedTemporaryFile(suffix=".ts", delete=False).name
+                    tmp_files.append(intro_ts)
+                    _apply_fade(intro_path, intro_ts, w, h,
+                                fade_in=intro_fade_in, fade_out=intro_fade_out)
+                    parts.append(intro_ts)
+
+                parts.append(main_ts)
+
+                # Step D: Outro with fade
+                if has_outro:
+                    print(f"  Appending outro: {outro_path}"
+                          f" (fade_in={outro_fade_in}s, fade_out={outro_fade_out}s)")
+                    outro_ts = tempfile.NamedTemporaryFile(suffix=".ts", delete=False).name
+                    tmp_files.append(outro_ts)
+                    _apply_fade(outro_path, outro_ts, w, h,
+                                fade_in=outro_fade_in, fade_out=outro_fade_out)
+                    parts.append(outro_ts)
+
+                # Step E: Concatenate
+                concat_input = "concat:" + "|".join(parts)
                 subprocess.run(
                     ["ffmpeg", "-y", "-i", concat_input,
                      "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                      "-c:a", "aac", output_path],
                     capture_output=True, check=True
                 )
-            else:
-                # No intro/outro — just move the main video to output
-                import shutil
-                shutil.move(main_video, output_path)
-                if main_video in tmp_files:
-                    tmp_files.remove(main_video)
 
         finally:
             for f in tmp_files:
