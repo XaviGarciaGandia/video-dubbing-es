@@ -3,8 +3,8 @@
 Gradio Web UI for the Video Dubbing Pipeline.
 
 Usage:
-    source /home/xavi/dubbing-env/bin/activate
-    export LD_LIBRARY_PATH="/home/xavi/dubbing-env/lib/python3.9/site-packages/nvidia/cublas/lib:/home/xavi/dubbing-env/lib/python3.9/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH"
+    source /home/xavi/dub_video/dubbing-env/bin/activate
+    export LD_LIBRARY_PATH="/home/xavi/dub_video/dubbing-env/lib/python3.9/site-packages/nvidia/cublas/lib:/home/xavi/dub_video/dubbing-env/lib/python3.9/site-packages/nvidia/cudnn/lib:$LD_LIBRARY_PATH"
     python dub_video_ui.py
 """
 

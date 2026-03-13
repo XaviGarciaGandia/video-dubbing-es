@@ -4,7 +4,7 @@ Video Dubbing Pipeline: English -> Spanish
 Uses: Faster Whisper (transcription) + Deep Translator (translation) + Edge TTS (speech synthesis) + FFmpeg (video processing)
 
 Usage:
-    source /home/xavi/dubbing-env/bin/activate
+    source /home/xavi/dub_video/dubbing-env/bin/activate
     python dub_video.py input_video.mp4
     python dub_video.py input_video.mp4 --voice es-MX-DaliaNeural
     python dub_video.py input_video.mp4 --keep-original-audio --original-volume 0.1
