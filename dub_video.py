@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-Video Dubbing Pipeline: English -> Spanish
+Video Dubbing Pipeline: English -> Spanish / Catalan
 Uses: Faster Whisper (transcription) + Deep Translator (translation) + Edge TTS (speech synthesis) + FFmpeg (video processing)
 
 Usage:
     source /home/xavi/dub_video/dubbing-env/bin/activate
     python dub_video.py input_video.mp4
+    python dub_video.py input_video.mp4 --target-lang ca
     python dub_video.py input_video.mp4 --voice es-MX-DaliaNeural
     python dub_video.py input_video.mp4 --keep-original-audio --original-volume 0.1
 """
@@ -55,9 +56,21 @@ def transcribe(audio_path: str, model_size: str = "large-v3", device: str = "cud
     return result
 
 
+LANG_NAMES = {"es": "Spanish", "ca": "Catalan"}
+
+DEFAULT_EDGE_VOICES = {
+    "es": "es-ES-AlvaroNeural",
+    "ca": "ca-ES-EnricNeural",
+}
+
+# XTTS v2 doesn't support Catalan; map to closest supported language
+XTTS_LANG_MAP = {"ca": "es"}
+
+
 def translate_segments(segments: list, source: str = "en", target: str = "es"):
     """Translate transcribed segments to target language."""
-    print(f"[3/5] Translating {len(segments)} segments to Spanish...")
+    lang_name = LANG_NAMES.get(target, target)
+    print(f"[3/5] Translating {len(segments)} segments to {lang_name}...")
     translator = GoogleTranslator(source=source, target=target)
 
     translated = []
@@ -112,10 +125,12 @@ def synthesize_segment_xtts(text: str, output_path: str, speaker_wav: str,
     """Synthesize a single segment with XTTS v2 voice cloning."""
     try:
         tts = _get_xtts_model(gpu=gpu)
+        # Map unsupported languages to closest supported one (e.g. ca -> es)
+        xtts_lang = XTTS_LANG_MAP.get(language, language)
         tts.tts_to_file(
             text=text,
             speaker_wav=speaker_wav,
-            language=language,
+            language=xtts_lang,
             file_path=output_path,
         )
     except Exception as e:
@@ -125,25 +140,27 @@ def synthesize_segment_xtts(text: str, output_path: str, speaker_wav: str,
 async def synthesize_all(segments: list, output_dir: str, voice: str,
                          natural_pace: bool = True, max_speedup: float = 1.1,
                          tts_engine: str = "edge", speaker_wav: str = None,
-                         gpu: bool = True):
+                         gpu: bool = True, language: str = "es"):
     """Synthesize all translated segments.
 
     tts_engine: "edge" for Edge TTS, "xtts" for XTTS v2 voice cloning.
     speaker_wav: path to reference voice WAV (required for xtts).
+    language: target language code ("es", "ca", etc.).
 
     If natural_pace is True, segments play at natural TTS speed and are only
     sped up (by at most max_speedup) when they would overlap the next segment.
     """
+    lang_name = LANG_NAMES.get(language, language)
     if tts_engine == "xtts":
-        print(f"[4/5] Generating Spanish speech with XTTS v2 (voice clone)...")
+        print(f"[4/5] Generating {lang_name} speech with XTTS v2 (voice clone)...")
         for i, seg in enumerate(segments):
             out_path = os.path.join(output_dir, f"seg_{i:04d}.wav")
             seg["audio_path"] = out_path
             synthesize_segment_xtts(seg["translated"], out_path, speaker_wav,
-                                    gpu=gpu)
+                                    language=language, gpu=gpu)
             print(f"  Segment {i}/{len(segments)-1}: {seg['translated'][:50]}...")
     else:
-        print(f"[4/5] Generating Spanish speech with Edge TTS ({voice})...")
+        print(f"[4/5] Generating {lang_name} speech with Edge TTS ({voice})...")
         tasks = []
         for i, seg in enumerate(segments):
             out_path = os.path.join(output_dir, f"seg_{i:04d}.mp3")
@@ -157,8 +174,15 @@ async def synthesize_all(segments: list, output_dir: str, voice: str,
             print(f"  Warning: Failed to generate audio for segment {i}")
             seg["tts_duration"] = 0
             continue
-        tts_audio = AudioSegment.from_file(seg["audio_path"])
-        seg["tts_duration"] = len(tts_audio) / 1000.0
+        try:
+            file_size = os.path.getsize(seg["audio_path"])
+            if file_size < 100:  # corrupt/empty file
+                raise ValueError(f"File too small ({file_size} bytes)")
+            tts_audio = AudioSegment.from_file(seg["audio_path"])
+            seg["tts_duration"] = len(tts_audio) / 1000.0
+        except Exception as e:
+            print(f"  Warning: Failed to decode audio for segment {i}: {e}")
+            seg["tts_duration"] = 0
 
     if natural_pace:
         # Natural pace: only speed up when TTS would overlap the next segment
@@ -232,7 +256,12 @@ def mix_audio(segments: list, total_duration: float, original_audio_path: str,
     for i, seg in enumerate(segments):
         if "audio_path" not in seg or not os.path.exists(seg["audio_path"]):
             continue
-        tts_audio = AudioSegment.from_file(seg["audio_path"])
+        if seg.get("tts_duration", 0) <= 0:
+            continue
+        try:
+            tts_audio = AudioSegment.from_file(seg["audio_path"])
+        except Exception:
+            continue
         position_ms = int(seg["start"] * 1000)
 
         if natural_pace:
@@ -323,6 +352,7 @@ def _apply_fade(input_path: str, output_path: str, w: str, h: str,
 
 def merge_video_audio(video_path: str, audio_segment: AudioSegment, output_path: str,
                       watermark_path: str = None, watermark_opacity: float = 0.3,
+                      watermark_scale: float = 1.0,
                       watermark_x: str = "W-w-10", watermark_y: str = "H-h-10",
                       intro_path: str = None, outro_path: str = None,
                       intro_fade_in: float = 0.0, intro_fade_out: float = 0.0,
@@ -343,12 +373,23 @@ def merge_video_audio(video_path: str, audio_segment: AudioSegment, output_path:
                 tmp_main.close()
 
                 opacity = max(0.0, min(1.0, watermark_opacity))
+                scale = max(0.05, min(2.0, watermark_scale))
+                # Build watermark filter: scale, then split to extract and
+                # scale alpha separately, then merge back.  This preserves
+                # the original PNG transparency correctly.
+                scale_part = ""
+                if scale != 1.0:
+                    scale_part = f",scale=iw*{scale}:ih*{scale}:flags=lanczos"
+                wm_filter = (
+                    f"[1:v]format=rgba{scale_part},split[wm_rgb][wm_a_in];"
+                    f"[wm_a_in]alphaextract,lut=c0='val*{opacity}'[wm_a];"
+                    f"[wm_rgb][wm_a]alphamerge[wm]"
+                )
                 subprocess.run(
                     ["ffmpeg", "-y",
                      "-i", video_path, "-i", watermark_path, "-i", tmp_audio.name,
                      "-filter_complex",
-                     f"[1:v]format=rgba,colorchannelmixer=aa={opacity}[wm];"
-                     f"[0:v][wm]overlay={watermark_x}:{watermark_y}[outv]",
+                     f"{wm_filter};[0:v][wm]overlay={watermark_x}:{watermark_y}[outv]",
                      "-map", "[outv]", "-map", "2:a:0",
                      "-c:v", "libx264", "-preset", "fast", "-crf", "18",
                      "-c:a", "aac", "-shortest", tmp_main.name],
@@ -447,15 +488,17 @@ def save_subtitles(segments: list, output_path: str):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Dub a video from English to Spanish")
+    parser = argparse.ArgumentParser(description="Dub a video from English to Spanish/Catalan")
     parser.add_argument("video", help="Path to input video file")
-    parser.add_argument("--output", "-o", help="Output video path (default: input_es.mp4)")
+    parser.add_argument("--output", "-o", help="Output video path (default: input_<lang>.mp4)")
+    parser.add_argument("--target-lang", default="es", choices=["es", "ca"],
+                        help="Target language: es (Spanish) or ca (Catalan)")
     parser.add_argument("--model", default="large-v3",
                         help="Whisper model size (tiny, base, small, medium, large-v3)")
     parser.add_argument("--device", default="cuda", choices=["cuda", "cpu"],
                         help="Device for Whisper inference")
-    parser.add_argument("--voice", default="es-ES-AlvaroNeural",
-                        help="Edge TTS voice (e.g., es-ES-AlvaroNeural, es-MX-DaliaNeural, es-ES-ElviraNeural)")
+    parser.add_argument("--voice", default=None,
+                        help="Edge TTS voice (default: auto per language)")
     parser.add_argument("--keep-original-audio", action="store_true",
                         help="Keep original audio at low volume in background")
     parser.add_argument("--original-volume", type=float, default=0.1,
@@ -478,11 +521,14 @@ def main():
         print(f"Error: Video file not found: {video_path}")
         sys.exit(1)
 
+    target_lang = args.target_lang
+    voice = args.voice or DEFAULT_EDGE_VOICES[target_lang]
+
     if args.output:
         output_path = os.path.abspath(args.output)
     else:
         stem = Path(video_path).stem
-        output_path = str(Path(video_path).parent / f"{stem}_es.mp4")
+        output_path = str(Path(video_path).parent / f"{stem}_{target_lang}.mp4")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         # Step 1: Extract audio
@@ -500,19 +546,20 @@ def main():
             json.dump(segments, f, indent=2, ensure_ascii=False)
 
         # Step 3: Translate
-        translated = translate_segments(segments)
+        translated = translate_segments(segments, target=target_lang)
 
         # Step 4: Synthesize TTS
         tts_dir = os.path.join(tmpdir, "tts")
         os.makedirs(tts_dir)
         natural_pace = not args.strict_pace
         use_gpu = args.device == "cuda"
-        asyncio.run(synthesize_all(translated, tts_dir, args.voice,
+        asyncio.run(synthesize_all(translated, tts_dir, voice,
                                    natural_pace=natural_pace,
                                    max_speedup=args.max_speedup,
                                    tts_engine=args.tts_engine,
                                    speaker_wav=args.speaker_wav,
-                                   gpu=use_gpu))
+                                   gpu=use_gpu,
+                                   language=target_lang))
 
         # Get total video duration
         result = subprocess.run(
